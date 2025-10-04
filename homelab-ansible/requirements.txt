@@ -1,0 +1,4 @@
+# Python requirements for dynamic inventory discovery
+netaddr>=0.8.0
+python-nmap>=0.6.1
+ansible>=2.9

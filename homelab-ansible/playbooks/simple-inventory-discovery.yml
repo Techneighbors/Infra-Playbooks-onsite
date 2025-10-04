@@ -1,0 +1,204 @@
+---
+- name: Simple Dynamic Inventory Cataloger
+  hosts: localhost
+  gather_facts: yes
+  vars:
+    # Define your IP ranges to scan here
+    ip_ranges:
+      - "192.168.1.1/24" # CIDR notation
+      - "192.168.2.1/24" # Add more subnets as needed
+      # - "10.0.0.1/24"     # Uncomment and modify as needed
+
+    # Ports to check for common services
+    service_ports:
+      ssh: 22
+      http: 80
+      https: 443
+      rdp: 3389
+      winrm: 5985
+      winrm_ssl: 5986
+
+    # Output directory for results
+    output_dir: "../inventory"
+
+    # Scan timeout in seconds
+    timeout: 3
+
+  tasks:
+    - name: Install required Python packages
+      ansible.builtin.pip:
+        name:
+          - netaddr
+          - python-nmap
+        state: present
+      delegate_to: localhost
+      run_once: true
+
+    - name: Generate IP addresses from CIDR ranges
+      ansible.builtin.set_fact:
+        all_ips: "{{ all_ips | default([]) + (item | ansible.utils.ipaddr('host')) }}"
+      loop: "{{ ip_ranges }}"
+
+    - name: Flatten IP list
+      ansible.builtin.set_fact:
+        ip_list: "{{ all_ips | flatten | unique }}"
+
+    - name: Discover active hosts using ping
+      ansible.builtin.shell: |
+        {% if ansible_os_family == "Windows" %}
+        ping -n 1 -w {{ timeout * 1000 }} {{ item }} > nul 2>&1 && echo "{{ item }}"
+        {% else %}
+        ping -c 1 -W {{ timeout }} {{ item }} > /dev/null 2>&1 && echo "{{ item }}"
+        {% endif %}
+      register: ping_results
+      loop: "{{ ip_list }}"
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Extract active hosts
+      ansible.builtin.set_fact:
+        active_hosts: "{{ ping_results.results | selectattr('stdout', 'defined') | selectattr('stdout', '!=', '') | map(attribute='stdout') | map('trim') | list }}"
+
+    - name: Display discovered hosts
+      ansible.builtin.debug:
+        msg: "Discovered {{ active_hosts | length }} active hosts: {{ active_hosts | join(', ') }}"
+
+    - name: Scan for SSH service
+      ansible.builtin.wait_for:
+        host: "{{ item }}"
+        port: "{{ service_ports.ssh }}"
+        timeout: "{{ timeout }}"
+        state: started
+      register: ssh_scan
+      loop: "{{ active_hosts }}"
+      ignore_errors: yes
+
+    - name: Scan for HTTP service
+      ansible.builtin.wait_for:
+        host: "{{ item }}"
+        port: "{{ service_ports.http }}"
+        timeout: "{{ timeout }}"
+        state: started
+      register: http_scan
+      loop: "{{ active_hosts }}"
+      ignore_errors: yes
+
+    - name: Scan for HTTPS service
+      ansible.builtin.wait_for:
+        host: "{{ item }}"
+        port: "{{ service_ports.https }}"
+        timeout: "{{ timeout }}"
+        state: started
+      register: https_scan
+      loop: "{{ active_hosts }}"
+      ignore_errors: yes
+
+    - name: Scan for RDP service
+      ansible.builtin.wait_for:
+        host: "{{ item }}"
+        port: "{{ service_ports.rdp }}"
+        timeout: "{{ timeout }}"
+        state: started
+      register: rdp_scan
+      loop: "{{ active_hosts }}"
+      ignore_errors: yes
+
+    - name: Create host inventory with service information
+      ansible.builtin.set_fact:
+        discovered_inventory: |
+          all:
+            children:
+              discovered_hosts:
+                hosts:
+          {% for host in active_hosts %}
+                  {{ host }}:
+                    ansible_host: {{ host }}
+                    discovered_date: "{{ ansible_date_time.iso8601 }}"
+                    services:
+          {% for result in ssh_scan.results %}
+          {% if result.item == host and not result.failed %}
+                      ssh: true
+          {% endif %}
+          {% endfor %}
+          {% for result in http_scan.results %}
+          {% if result.item == host and not result.failed %}
+                      http: true
+          {% endif %}
+          {% endfor %}
+          {% for result in https_scan.results %}
+          {% if result.item == host and not result.failed %}
+                      https: true
+          {% endif %}
+          {% endfor %}
+          {% for result in rdp_scan.results %}
+          {% if result.item == host and not result.failed %}
+                      rdp: true
+          {% endif %}
+          {% endfor %}
+          {% endfor %}
+              ssh_hosts:
+                hosts:
+          {% for result in ssh_scan.results %}
+          {% if not result.failed %}
+                  {{ result.item }}:
+          {% endif %}
+          {% endfor %}
+              web_servers:
+                hosts:
+          {% for result in http_scan.results %}
+          {% if not result.failed %}
+                  {{ result.item }}:
+          {% endif %}
+          {% endfor %}
+          {% for result in https_scan.results %}
+          {% if not result.failed %}
+                  {{ result.item }}:
+          {% endif %}
+          {% endfor %}
+              windows_hosts:
+                hosts:
+          {% for result in rdp_scan.results %}
+          {% if not result.failed %}
+                  {{ result.item }}:
+          {% endif %}
+          {% endfor %}
+
+    - name: Ensure output directory exists
+      ansible.builtin.file:
+        path: "{{ output_dir }}"
+        state: directory
+
+    - name: Write discovered inventory to YAML file
+      ansible.builtin.copy:
+        content: "{{ discovered_inventory }}"
+        dest: "{{ output_dir }}/discovered_hosts.yml"
+        backup: yes
+      when: active_hosts | length > 0
+
+    - name: Create CSV report of discovered hosts
+      ansible.builtin.copy:
+        content: |
+          IP Address,SSH,HTTP,HTTPS,RDP,Discovery Date
+          {% for host in active_hosts %}
+          {{ host }},{{ 'Yes' if ssh_scan.results | selectattr('item', 'equalto', host) | selectattr('failed', 'equalto', false) | list | length > 0 else 'No' }},{{ 'Yes' if http_scan.results | selectattr('item', 'equalto', host) | selectattr('failed', 'equalto', false) | list | length > 0 else 'No' }},{{ 'Yes' if https_scan.results | selectattr('item', 'equalto', host) | selectattr('failed', 'equalto', false) | list | length > 0 else 'No' }},{{ 'Yes' if rdp_scan.results | selectattr('item', 'equalto', host) | selectattr('failed', 'equalto', false) | list | length > 0 else 'No' }},{{ ansible_date_time.iso8601 }}
+          {% endfor %}
+        dest: "{{ output_dir }}/host_discovery_report.csv"
+      when: active_hosts | length > 0
+
+    - name: Display final summary
+      ansible.builtin.debug:
+        msg: |
+          ====================================
+          Dynamic Inventory Scan Complete
+          ====================================
+          Scanned IP Ranges: {{ ip_ranges | join(', ') }}
+          Total IPs Scanned: {{ ip_list | length }}
+          Active Hosts Found: {{ active_hosts | length }}
+
+          Files Created:
+          - {{ output_dir }}/discovered_hosts.yml (Ansible inventory)
+          - {{ output_dir }}/host_discovery_report.csv (Summary report)
+
+          SSH-enabled hosts: {{ ssh_scan.results | selectattr('failed', 'equalto', false) | map(attribute='item') | list | length }}
+          Web servers found: {{ (http_scan.results | selectattr('failed', 'equalto', false) | list | length) + (https_scan.results | selectattr('failed', 'equalto', false) | list | length) }}
+          Windows hosts found: {{ rdp_scan.results | selectattr('failed', 'equalto', false) | map(attribute='item') | list | length }}

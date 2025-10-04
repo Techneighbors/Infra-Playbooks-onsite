@@ -1,0 +1,27 @@
+- name: Install common packages
+  apt:
+    name:
+      - git
+      - curl
+      - vim
+    state: present
+
+- name: Ensure the latest version of the system is installed
+  apt:
+    upgrade: dist
+    update_cache: yes
+
+- name: Set up basic firewall rules
+  ufw:
+    rule: allow
+    name: 'OpenSSH'
+
+- name: Enable the firewall
+  ufw:
+    state: enabled
+
+- name: Install Python3 if not present
+  apt:
+    name: python3
+    state: present
+  when: ansible_os_family == "Debian"
