@@ -1,0 +1,236 @@
+---
+- name: Basic Network Discovery - No External Dependencies
+  hosts: localhost
+  gather_facts: yes
+  vars:
+    # Define specific IP addresses or small ranges manually
+    # This avoids complex subnet calculations and external dependencies
+    target_ips:
+      # Example IPs - replace with your actual network IPs
+      - "192.168.1.1"
+      - "192.168.1.10"
+      - "192.168.1.20"
+      - "192.168.1.50"
+      - "192.168.1.100"
+      - "10.2.10.1"
+      - "10.2.10.10"
+      - "10.2.10.20"
+      # Add more IPs as needed
+
+    # Or generate ranges manually (uncomment and modify as needed)
+    # generated_ips: "{{ range(1, 51) | map('string') | map('regex_replace', '^(.*)$', '192.168.1.\\1') | list }}"
+
+    # Common service ports to check
+    service_ports:
+      - { name: "ssh", port: 22 }
+      - { name: "http", port: 80 }
+      - { name: "https", port: 443 }
+      - { name: "rdp", port: 3389 }
+
+    # Output settings
+    output_dir: "../inventory"
+    timeout: 3
+
+  tasks:
+    - name: Ensure output directory exists
+      ansible.builtin.file:
+        path: "{{ output_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Test connectivity to target IPs
+      ansible.builtin.shell: |
+        {% if ansible_os_family == "Windows" %}
+        ping -n 1 -w {{ timeout * 1000 }} {{ item }} > nul 2>&1 && echo "{{ item }}" || echo ""
+        {% else %}
+        ping -c 1 -W {{ timeout }} {{ item }} > /dev/null 2>&1 && echo "{{ item }}" || echo ""
+        {% endif %}
+      register: ping_results
+      loop: "{{ target_ips }}"
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Extract active hosts
+      ansible.builtin.set_fact:
+        active_hosts: "{{ ping_results.results | selectattr('stdout', 'defined') | selectattr('stdout', '!=', '') | map(attribute='stdout') | map('trim') | select('match', '^[0-9.]+$') | list }}"
+
+    - name: Display discovered hosts
+      ansible.builtin.debug:
+        msg: "Found {{ active_hosts | length }} active hosts: {{ active_hosts | join(', ') }}"
+
+    - name: Check SSH availability on active hosts
+      ansible.builtin.wait_for:
+        host: "{{ item }}"
+        port: 22
+        timeout: "{{ timeout }}"
+        state: started
+      register: ssh_check
+      loop: "{{ active_hosts }}"
+      ignore_errors: yes
+      when: active_hosts | length > 0
+
+    - name: Check HTTP availability on active hosts
+      ansible.builtin.wait_for:
+        host: "{{ item }}"
+        port: 80
+        timeout: "{{ timeout }}"
+        state: started
+      register: http_check
+      loop: "{{ active_hosts }}"
+      ignore_errors: yes
+      when: active_hosts | length > 0
+
+    - name: Check HTTPS availability on active hosts
+      ansible.builtin.wait_for:
+        host: "{{ item }}"
+        port: 443
+        timeout: "{{ timeout }}"
+        state: started
+      register: https_check
+      loop: "{{ active_hosts }}"
+      ignore_errors: yes
+      when: active_hosts | length > 0
+
+    - name: Check RDP availability on active hosts
+      ansible.builtin.wait_for:
+        host: "{{ item }}"
+        port: 3389
+        timeout: "{{ timeout }}"
+        state: started
+      register: rdp_check
+      loop: "{{ active_hosts }}"
+      ignore_errors: yes
+      when: active_hosts | length > 0
+
+    - name: Build service availability map
+      ansible.builtin.set_fact:
+        host_services: "{{ host_services | default({}) | combine({item: []}) }}"
+      loop: "{{ active_hosts }}"
+      when: active_hosts | length > 0
+
+    - name: Mark SSH-enabled hosts
+      ansible.builtin.set_fact:
+        host_services: "{{ host_services | combine({item.item: (host_services[item.item] + ['ssh'])}) }}"
+      loop: "{{ ssh_check.results | default([]) }}"
+      when:
+        - item is defined
+        - not item.failed | default(true)
+        - item.item in active_hosts
+
+    - name: Mark HTTP-enabled hosts
+      ansible.builtin.set_fact:
+        host_services: "{{ host_services | combine({item.item: (host_services[item.item] + ['http'])}) }}"
+      loop: "{{ http_check.results | default([]) }}"
+      when:
+        - item is defined
+        - not item.failed | default(true)
+        - item.item in active_hosts
+
+    - name: Mark HTTPS-enabled hosts
+      ansible.builtin.set_fact:
+        host_services: "{{ host_services | combine({item.item: (host_services[item.item] + ['https'])}) }}"
+      loop: "{{ https_check.results | default([]) }}"
+      when:
+        - item is defined
+        - not item.failed | default(true)
+        - item.item in active_hosts
+
+    - name: Mark RDP-enabled hosts
+      ansible.builtin.set_fact:
+        host_services: "{{ host_services | combine({item.item: (host_services[item.item] + ['rdp'])}) }}"
+      loop: "{{ rdp_check.results | default([]) }}"
+      when:
+        - item is defined
+        - not item.failed | default(true)
+        - item.item in active_hosts
+
+    - name: Create discovered inventory
+      ansible.builtin.copy:
+        content: |
+          # Automatically discovered hosts
+          # Generated on: {{ ansible_date_time.iso8601 }}
+
+          all:
+            children:
+              discovered_hosts:
+                hosts:
+          {% for host in active_hosts %}
+                  {{ host | replace('.', '_') }}:
+                    ansible_host: {{ host }}
+                    discovered_date: "{{ ansible_date_time.iso8601 }}"
+          {% if host_services[host] is defined and host_services[host] | length > 0 %}
+                    available_services: {{ host_services[host] | to_json }}
+          {% endif %}
+          {% endfor %}
+
+              ssh_hosts:
+                hosts:
+          {% for host in active_hosts %}
+          {% if host_services[host] is defined and 'ssh' in host_services[host] %}
+                  {{ host | replace('.', '_') }}:
+          {% endif %}
+          {% endfor %}
+
+              web_servers:
+                hosts:
+          {% for host in active_hosts %}
+          {% if host_services[host] is defined and ('http' in host_services[host] or 'https' in host_services[host]) %}
+                  {{ host | replace('.', '_') }}:
+          {% endif %}
+          {% endfor %}
+
+              windows_hosts:
+                hosts:
+          {% for host in active_hosts %}
+          {% if host_services[host] is defined and 'rdp' in host_services[host] %}
+                  {{ host | replace('.', '_') }}:
+          {% endif %}
+          {% endfor %}
+        dest: "{{ output_dir }}/discovered_hosts.yml"
+        mode: "0644"
+      when: active_hosts | length > 0
+
+    - name: Create summary report
+      ansible.builtin.copy:
+        content: |
+          Network Discovery Report
+          Generated: {{ ansible_date_time.iso8601 }}
+
+          Summary:
+          - IPs Scanned: {{ target_ips | length }}
+          - Active Hosts: {{ active_hosts | length }}
+
+          Discovered Hosts:
+          {% for host in active_hosts %}
+          - {{ host }}{% if host_services[host] is defined and host_services[host] | length > 0 %} ({{ host_services[host] | join(', ') }}){% endif %}
+          {% endfor %}
+
+          Service Summary:
+          - SSH: {{ (host_services.values() | list | map('select', 'equalto', 'ssh') | map('list') | map('length') | sum) if host_services is defined else 0 }} hosts
+          - HTTP: {{ (host_services.values() | list | map('select', 'equalto', 'http') | map('list') | map('length') | sum) if host_services is defined else 0 }} hosts
+          - HTTPS: {{ (host_services.values() | list | map('select', 'equalto', 'https') | map('list') | map('length') | sum) if host_services is defined else 0 }} hosts
+          - RDP: {{ (host_services.values() | list | map('select', 'equalto', 'rdp') | map('list') | map('length') | sum) if host_services is defined else 0 }} hosts
+        dest: "{{ output_dir }}/discovery_report.txt"
+        mode: "0644"
+
+    - name: Display final summary
+      ansible.builtin.debug:
+        msg: |
+          ====================================
+          Network Discovery Complete
+          ====================================
+          Scanned {{ target_ips | length }} IP addresses
+          Found {{ active_hosts | length }} active hosts
+
+          {% if active_hosts | length > 0 %}
+          Active Hosts:
+          {% for host in active_hosts %}
+          - {{ host }}{% if host_services[host] is defined and host_services[host] | length > 0 %} ({{ host_services[host] | join(', ') }}){% endif %}
+          {% endfor %}
+
+          Files created:
+          - {{ output_dir }}/discovered_hosts.yml
+          - {{ output_dir }}/discovery_report.txt
+          {% else %}
+          No active hosts found. Check your target_ips configuration.
+          {% endif %}

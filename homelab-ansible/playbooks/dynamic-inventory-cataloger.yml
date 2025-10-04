@@ -1,13 +1,17 @@
 ---
 - name: Dynamic Inventory Cataloger - Discover and catalog hosts in IP ranges
   hosts: localhost
-  gather_facts: no
+  gather_facts: yes
   vars:
-    # Define your IP ranges to scan here
-    ip_ranges:
-      - "192.168.1.1-192.168.1.254"
-      - "10.2.10.1-10.2.10.254"
-      # Add more ranges as needed
+    # Define your IP ranges to scan here (simple subnet format)
+    ip_subnets:
+      - base: "192.168.1"
+        start: 1
+        end: 254
+      - base: "10.2.10"
+        start: 1
+        end: 254
+      # Add more subnets as needed
 
     # Ports to check for common services
     common_ports:
@@ -39,7 +43,6 @@
       - 8000 # Common alternative HTTP port
       - 9000 # Common alternative HTTP port
       - 10000 # Webmin
-      - 27017 # MongoDB
       - 50070 # Hadoop NameNode
       - 50075 # Hadoop DataNode
       - 6006 # TensorBoard
@@ -58,13 +61,10 @@
         suffix: inventory_scan
       register: temp_dir
 
-    - name: Generate IP list from ranges
+    - name: Generate IP list from subnets (no external dependencies)
       ansible.builtin.set_fact:
-        all_ips: "{{ all_ips | default([]) + range(start_ip | ipv4('int'), end_ip | ipv4('int') + 1) | map('ipv4') | list }}"
-      vars:
-        start_ip: "{{ item.split('-')[0] }}"
-        end_ip: "{{ item.split('-')[1] }}"
-      loop: "{{ ip_ranges }}"
+        all_ips: "{{ all_ips | default([]) + range(item.start, item.end + 1) | map('string') | map('regex_replace', '^(.*)$', item.base + '.\\1') | list }}"
+      loop: "{{ ip_subnets }}"
 
     - name: Ping sweep to discover active hosts
       ansible.builtin.command:

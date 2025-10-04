@@ -1,4 +1,11 @@
-# Python requirements for dynamic inventory discovery
-netaddr>=0.8.0
-python-nmap>=0.6.1
+# Python requirements for homelab ansible playbooks
+# Note: Basic discovery playbooks don't require additional Python packages
+# They use only built-in Ansible modules
+
+# Optional packages for advanced features (install manually if needed):
+# netaddr>=0.8.0        # For advanced IP address manipulation
+# python-nmap>=0.6.1    # For detailed port scanning
+# requests>=2.25.0      # For HTTP-based discovery
+
+# Core requirement
 ansible>=2.9

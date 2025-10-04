@@ -3,11 +3,15 @@
   hosts: localhost
   gather_facts: yes
   vars:
-    # Define your IP ranges to scan here
-    ip_ranges:
-      - "192.168.1.1/24" # CIDR notation
-      - "192.168.2.1/24" # Add more subnets as needed
-      # - "10.0.0.1/24"     # Uncomment and modify as needed
+    # Define your IP subnets to scan here (simple format - no external dependencies)
+    ip_subnets:
+      - base: "192.168.1"
+        start: 1
+        end: 254
+      - base: "10.2.10"
+        start: 1
+        end: 254
+      # Add more subnets as needed: base: "10.0.0", start: 1, end: 254
 
     # Ports to check for common services
     service_ports:
@@ -25,21 +29,12 @@
     timeout: 3
 
   tasks:
-    - name: Install required Python packages
-      ansible.builtin.pip:
-        name:
-          - netaddr
-          - python-nmap
-        state: present
-      delegate_to: localhost
-      run_once: true
-
-    - name: Generate IP addresses from CIDR ranges
+    - name: Generate IP addresses from subnet definitions (no external dependencies)
       ansible.builtin.set_fact:
-        all_ips: "{{ all_ips | default([]) + (item | ansible.utils.ipaddr('host')) }}"
-      loop: "{{ ip_ranges }}"
+        all_ips: "{{ all_ips | default([]) + range(item.start, item.end + 1) | map('string') | map('regex_replace', '^(.*)$', item.base + '.\\1') | list }}"
+      loop: "{{ ip_subnets }}"
 
-    - name: Flatten IP list
+    - name: Flatten and deduplicate IP list
       ansible.builtin.set_fact:
         ip_list: "{{ all_ips | flatten | unique }}"
 
