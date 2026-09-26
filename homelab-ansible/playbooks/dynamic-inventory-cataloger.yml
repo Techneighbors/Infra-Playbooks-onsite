@@ -1,7 +1,7 @@
 ---
 - name: Dynamic Inventory Cataloger - Discover and catalog hosts in IP ranges
   hosts: localhost
-  gather_facts: yes
+  gather_facts: true
   vars:
     # Define your IP ranges to scan here (simple subnet format)
     ip_subnets:
@@ -70,8 +70,8 @@
       ansible.builtin.command:
         cmd: "ping -c 1 -W {{ discovery_timeout }} {{ item }}"
       register: ping_results
-      loop: "{{ all_ips }}"
-      ignore_errors: yes
+      loop: "{{ all_ips | default([]) }}"
+      ignore_errors: true
       changed_when: false
       when: ansible_os_family != "Windows"
 
@@ -79,8 +79,8 @@
       ansible.builtin.command:
         cmd: "ping -n 1 -w {{ discovery_timeout * 1000 }} {{ item }}"
       register: ping_results_windows
-      loop: "{{ all_ips }}"
-      ignore_errors: yes
+      loop: "{{ all_ips | default([]) }}"
+      ignore_errors: true
       changed_when: false
       when: ansible_os_family == "Windows"
 
@@ -106,7 +106,7 @@
         state: started
       register: port_scan_results
       loop: "{{ active_hosts | product(common_ports) | list }}"
-      ignore_errors: yes
+      ignore_errors: true
       when: active_hosts is defined and active_hosts | length > 0
 
     - name: Process port scan results
@@ -130,7 +130,7 @@
         timeout: "{{ discovery_timeout }}"
       register: http_check
       loop: "{{ active_hosts | default([]) }}"
-      ignore_errors: yes
+      ignore_errors: true
       when:
         - active_hosts is defined
         - active_hosts | length > 0
@@ -157,139 +157,6 @@
             )
           }}
 
-    - name: Enhance inventory with service detection
-      ansible.builtin.set_fact:
-        enhanced_inventory: >-
-          {{
-            discovered_inventory | combine({
-              'all': {
-                'children': {
-                  'discovered': {
-                    'hosts': enhanced_hosts
-                  },
-                  'ssh_hosts': {
-                    'hosts': ssh_hosts
-                  },
-                  'web_servers': {
-                    'hosts': web_hosts
-                  },
-                  'windows_hosts': {
-                    'hosts': windows_hosts
-                  }
-                }
-              }
-            }, recursive=true)
-          }}
-      vars:
-        enhanced_hosts: >-
-          {{
-            dict(
-              active_hosts | default([]) |
-              zip(
-                active_hosts | default([]) | map('extract', host_info_map, {})
-              )
-            )
-          }}
-        host_info_map: >-
-          {{
-            dict(
-              active_hosts | default([]) |
-              zip(
-                active_hosts | default([]) | map('create_host_info')
-              )
-            )
-          }}
-        ssh_hosts: >-
-          {{
-            dict(
-              (active_hosts | default([])) |
-              selectattr('ssh_available', 'defined') |
-              selectattr('ssh_available', 'equalto', true) |
-              map('extract', enhanced_hosts)
-            )
-          }}
-        web_hosts: >-
-          {{
-            dict(
-              (active_hosts | default([])) |
-              select('has_web_service') |
-              map('extract', enhanced_hosts)
-            )
-          }}
-        windows_hosts: >-
-          {{
-            dict(
-              (active_hosts | default([])) |
-              select('has_rdp_or_winrm') |
-              map('extract', enhanced_hosts)
-            )
-          }}
-
-    - name: Create simplified inventory for discovered hosts
-      ansible.builtin.set_fact:
-        final_inventory:
-          all:
-            children:
-              discovered:
-                hosts: "{{ simple_hosts }}"
-              ssh_enabled:
-                hosts: "{{ ssh_enabled_hosts }}"
-              web_servers:
-                hosts: "{{ web_server_hosts }}"
-              windows_hosts:
-                hosts: "{{ windows_host_list }}"
-      vars:
-        simple_hosts: >-
-          {{
-            dict(
-              active_hosts | default([]) |
-              zip(
-                active_hosts | default([]) | map('build_host_entry') | list
-              )
-            )
-          }}
-        ssh_enabled_hosts: >-
-          {{
-            dict(
-              (active_hosts | default([])) |
-              select('test', 'in', (host_services.keys() | list)) |
-              select('has_ssh_port') |
-              zip(
-                (active_hosts | default([])) |
-                select('test', 'in', (host_services.keys() | list)) |
-                select('has_ssh_port') |
-                map('build_host_entry') | list
-              )
-            )
-          }}
-        web_server_hosts: >-
-          {{
-            dict(
-              (active_hosts | default([])) |
-              select('test', 'in', (host_services.keys() | list)) |
-              select('has_web_ports') |
-              zip(
-                (active_hosts | default([])) |
-                select('test', 'in', (host_services.keys() | list)) |
-                select('has_web_ports') |
-                map('build_host_entry') | list
-              )
-            )
-          }}
-        windows_host_list: >-
-          {{
-            dict(
-              (active_hosts | default([])) |
-              select('test', 'in', (host_services.keys() | list)) |
-              select('has_windows_ports') |
-              zip(
-                (active_hosts | default([])) |
-                select('test', 'in', (host_services.keys() | list)) |
-                select('has_windows_ports') |
-                map('build_host_entry') | list
-              )
-            )
-          }}
 
     # Simplified approach - create basic inventory
     - name: Create basic discovered inventory
@@ -298,42 +165,54 @@
           all:
             children:
               discovered:
-                hosts: "{{ basic_host_dict }}"
-      vars:
-        basic_host_dict: >-
+                hosts: {}
+
+    - name: Add active hosts to basic inventory
+      ansible.builtin.set_fact:
+        basic_inventory: >-
           {{
-            dict(
-              active_hosts | default([]) |
-              zip(
-                active_hosts | default([]) |
-                map('create_basic_host_entry') | list
-              )
-            ) if active_hosts is defined else {}
+            basic_inventory | combine({
+              'all': {
+                'children': {
+                  'discovered': {
+                    'hosts': {
+                      item: {
+                        'ansible_host': item
+                      }
+                    }
+                  }
+                }
+              }
+            }, recursive=true)
           }}
+      loop: "{{ active_hosts | default([]) }}"
 
     - name: Write discovered inventory to file
       ansible.builtin.copy:
         content: "{{ basic_inventory | to_nice_yaml }}"
         dest: "{{ inventory_output_file }}"
-        backup: yes
+        mode: "0644"
+        backup: true
       when: active_hosts is defined and active_hosts | length > 0
 
     - name: Create detailed scan report
-      ansible.builtin.template:
-        src: scan_report.j2
-        dest: "{{ temp_dir.path }}/scan_report.txt"
-      vars:
-        scan_timestamp: "{{ ansible_date_time.iso8601 }}"
-        total_ips_scanned: "{{ all_ips | length }}"
-        active_hosts_found: "{{ active_hosts | default([]) | length }}"
-        discovered_services: "{{ host_services | default({}) }}"
+      ansible.builtin.copy:
+        content: |
+          Dynamic Inventory Scan Report
+          =============================
+          Scan timestamp: {{ ansible_date_time.iso8601 }}
+          Total IPs scanned: {{ all_ips | default([]) | length }}
+          Active hosts found: {{ active_hosts | default([]) | length }}
+          Discovered services: {{ host_services | default({}) | to_nice_json }}
+        dest: "{{ inventory_output_file }}.report"
+        mode: "0644"
 
     - name: Display scan summary
       ansible.builtin.debug:
         msg: |
           === Dynamic Inventory Scan Complete ===
-          IP Ranges Scanned: {{ ip_ranges | join(', ') }}
-          Total IPs Scanned: {{ all_ips | length }}
+          IP Ranges Scanned: {{ ip_subnets | map(attribute='base') | join(', ') }}
+          Total IPs Scanned: {{ all_ips | default([]) | length }}
           Active Hosts Found: {{ active_hosts | default([]) | length }}
           Inventory File: {{ inventory_output_file }}
 
@@ -348,5 +227,6 @@
       ansible.builtin.file:
         path: "{{ temp_dir.path }}"
         state: absent
+      when: temp_dir is defined
 # Custom filter plugins would go here in a real implementation
 # For now, we'll use a simplified approach in the tasks above
